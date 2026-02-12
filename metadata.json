@@ -1,0 +1,5 @@
+{
+  "name": "Reporter Fact-Check Assistant",
+  "description": "A high-precision tool for journalists to verify claims, source reputable citations, and generate formatted footnotes using real-time search grounding.",
+  "requestFramePermissions": []
+}
