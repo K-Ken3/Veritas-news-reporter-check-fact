@@ -1,21 +1,21 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { performFactCheck } from './services/geminiService';
-import { FactCheckResult, HistoryItem, CitationFormat, Source } from './types';
+import { FactCheckResult, HistoryItem, CitationFormat, Source, User } from './types';
 import SourceCard from './components/SourceCard';
 import VerdictBadge from './components/VerdictBadge';
+import LoginOverlay from './components/LoginOverlay';
 
 const LOADING_MESSAGES = [
-  "Extracting check-worthy claims...",
-  "Querying institutional databases...",
-  "Scanning global news corridors...",
-  "Analyzing evidence strength...",
-  "Cross-referencing NGO & Academic data...",
-  "Synthesizing verification dossiers...",
-  "Calculating evidentiary confidence...",
+  "Synchronizing with search index...",
+  "Cross-referencing institutional data...",
+  "Scanning academic archives...",
+  "Validating source credibility...",
+  "Building evidentiary timeline...",
 ];
 
 const App: React.FC = () => {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [inputText, setInputText] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [loadingMsgIdx, setLoadingMsgIdx] = useState(0);
@@ -23,17 +23,52 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [error, setError] = useState<{ message: string; type: 'quota' | 'general' } | null>(null);
   const [citationFormat, setCitationFormat] = useState<CitationFormat>('Plain Text');
+  const [cooldown, setCooldown] = useState(0);
   
   const resultsRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Load User from Session
   useEffect(() => {
-    const saved = localStorage.getItem('veritas_history');
-    if (saved) {
+    const savedUser = localStorage.getItem('veritas_session');
+    if (savedUser) {
       try {
-        setHistory(JSON.parse(saved));
+        const user = JSON.parse(savedUser);
+        setCurrentUser(user);
       } catch (e) { console.error(e); }
     }
   }, []);
+
+  // Load History based on User
+  useEffect(() => {
+    if (currentUser) {
+      const storageKey = `veritas_history_${currentUser.email}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        try { setHistory(JSON.parse(saved)); } catch (e) { console.error(e); }
+      } else {
+        setHistory([]);
+      }
+    }
+  }, [currentUser]);
+
+  // Save history whenever it changes
+  useEffect(() => {
+    if (currentUser && history.length >= 0) {
+      const storageKey = `veritas_history_${currentUser.email}`;
+      localStorage.setItem(storageKey, JSON.stringify(history));
+    }
+  }, [history, currentUser]);
+
+  useEffect(() => {
+    let timer: any;
+    if (cooldown > 0) {
+      timer = setInterval(() => {
+        setCooldown((prev) => prev - 1);
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [cooldown]);
 
   useEffect(() => {
     let interval: any;
@@ -45,8 +80,21 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [isAnalyzing]);
 
+  const handleLogin = (email: string) => {
+    const user = { email, lastLogin: Date.now() };
+    setCurrentUser(user);
+    localStorage.setItem('veritas_session', JSON.stringify(user));
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem('veritas_session');
+    setResult(null);
+    setInputText('');
+  };
+
   const handleAnalyze = async () => {
-    if (!inputText.trim() || isAnalyzing) return;
+    if (!inputText.trim() || isAnalyzing || cooldown > 0) return;
     
     setIsAnalyzing(true);
     setError(null);
@@ -63,60 +111,85 @@ const App: React.FC = () => {
         result: data,
       };
       
-      const updatedHistory = [newHistoryItem, ...history].slice(0, 15);
-      setHistory(updatedHistory);
-      localStorage.setItem('veritas_history', JSON.stringify(updatedHistory));
-      
+      setHistory(prev => [newHistoryItem, ...prev].slice(0, 50));
+      setCooldown(60);
+
       setTimeout(() => {
         resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 100);
     } catch (err: any) {
-      const isQuota = err.message?.includes("QUOTA_EXCEEDED");
-      setError({ 
-        message: err.message || 'An error occurred during analysis.',
-        type: isQuota ? 'quota' : 'general'
-      });
+      const isQuota = err.message?.includes("QUOTA") || err.message?.includes("429");
+      if (isQuota) {
+        setCooldown(70);
+        setError({ 
+          message: "The Google Search tool for this project is currently exhausted. Please wait for the countdown to hit zero before attempting a re-scan.",
+          type: 'quota'
+        });
+      } else {
+        setError({ 
+          message: err.message || 'Verification failed. Please check your connection.',
+          type: 'general'
+        });
+      }
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const getCitation = (source: Source, index: number): string => {
-    const pub = source.publisher || "Unknown Publisher";
-    const date = source.publishedDate || "n.d.";
-    switch(citationFormat) {
-      case 'APA': return `(${index + 1}) ${pub}. (${date}). ${source.title}. Retrieved from ${source.uri}`;
-      case 'MLA': return `(${index + 1}) "${source.title}." ${pub}, ${date}, ${source.uri}.`;
-      case 'Markdown': return `[${index + 1}] [${source.title}](${source.uri}) - ${pub} (${date})`;
-      default: return `[${index + 1}] ${source.title}. ${pub} (${date}). ${source.uri}`;
+  const deleteHistoryItem = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (window.confirm("Permanently purge this investigation from the archive?")) {
+      setHistory(prev => prev.filter(item => item.id !== id));
+      if (result && history.find(h => h.id === id)?.input === inputText) {
+        setResult(null);
+      }
     }
   };
 
-  const copyAllCitations = () => {
-    if (!result) return;
-    const text = result.sources.map((s, i) => getCitation(s, i)).join('\n');
-    navigator.clipboard.writeText(text);
-    alert('All citations copied!');
+  const exportArchive = () => {
+    if (!currentUser) return;
+    const data = JSON.stringify(history, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `veritas_archive_${currentUser.email.split('@')[0]}_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
-  const exportFullReport = () => {
-    if (!result) return;
-    const report = `VERITAS INTELLECT REPORT
-Generated: ${new Date().toLocaleString()}
-Confidence: ${result.confidenceScore}%
+  const triggerImport = () => fileInputRef.current?.click();
 
-SUMMARY:
-${result.summary}
+  const importArchive = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-CLAIMS ANALYSIS:
-${result.claims.map(c => `- CLAIM: ${c.text}\n  VERDICT: ${c.verdict.toUpperCase()}\n  REASONING: ${c.reasoning}`).join('\n\n')}
-
-SOURCES:
-${result.sources.map((s, i) => `[${i+1}] ${s.title} (${s.uri})`).join('\n')}
-`;
-    navigator.clipboard.writeText(report);
-    alert('Full Intelligence Report copied to clipboard!');
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target?.result as string);
+        if (Array.isArray(imported)) {
+          setHistory(prev => {
+            const combined = [...imported, ...prev];
+            // Unique by ID
+            return Array.from(new Map(combined.map(item => [item.id, item])).values())
+              .sort((a, b) => b.timestamp - a.timestamp)
+              .slice(0, 100);
+          });
+          alert('Dossier successfully integrated into archive.');
+        }
+      } catch (err) {
+        alert('Failed to parse archive file. Invalid format.');
+      }
+    };
+    reader.readAsText(file);
   };
+
+  if (!currentUser) {
+    return <LoginOverlay onLogin={handleLogin} />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 selection:bg-blue-100">
@@ -126,12 +199,21 @@ ${result.sources.map((s, i) => `[${i+1}] ${s.title} (${s.uri})`).join('\n')}
             <div className="w-9 h-9 bg-slate-900 rounded-lg flex items-center justify-center text-white font-black text-xl shadow-sm italic">V</div>
             <div>
               <h1 className="text-lg font-bold tracking-tight text-slate-900 leading-none">VERITAS</h1>
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Evidence Discovery Engine</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Investigative Evidence Engine</span>
             </div>
           </div>
-          <div className="hidden md:flex gap-4 items-center">
-            <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded">V2.4 PRO</span>
-            <button onClick={() => { setInputText(''); setResult(null); setError(null); }} className="text-xs font-bold text-slate-600 hover:text-blue-600 transition-colors">Reset Terminal</button>
+          <div className="flex gap-4 items-center">
+            <div className={`hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-[10px] font-bold ${cooldown > 0 ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>
+              <div className={`w-1.5 h-1.5 rounded-full ${cooldown > 0 ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`}></div>
+              {cooldown > 0 ? `SEARCH COOLING: ${cooldown}s` : 'SEARCH READY'}
+            </div>
+            <div className="h-6 w-px bg-slate-200 hidden md:block"></div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest truncate max-w-[120px]">{currentUser.email}</span>
+              <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600 transition-colors">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -140,57 +222,49 @@ ${result.sources.map((s, i) => `[${i+1}] ${s.title} (${s.uri})`).join('\n')}
         <div className="lg:col-span-8 space-y-6">
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex justify-between items-center">
-              <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Verification Chamber</h2>
-              <span className="text-[10px] text-slate-400 font-mono">{inputText.length} chars</span>
+              <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Input Analysis Terminal</h2>
+              <span className="text-[10px] text-slate-400 font-mono italic">Secure Local Encryption Active</span>
             </div>
             <div className="p-6">
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="Paste a claim or article paragraph to verify..."
-                className="w-full h-44 p-0 text-xl serif leading-relaxed border-none focus:ring-0 resize-none placeholder:text-slate-300 text-slate-800"
+                placeholder="Paste claim text to cross-reference..."
+                className="w-full h-40 p-0 text-xl serif leading-relaxed border-none focus:ring-0 resize-none placeholder:text-slate-300 text-slate-800"
               />
+              
               {error && (
-                <div className={`mt-4 p-4 rounded-xl flex items-start gap-3 animate-in fade-in zoom-in duration-300 border ${
-                  error.type === 'quota' ? 'bg-amber-50 border-amber-100 text-amber-800' : 'bg-rose-50 border-rose-100 text-rose-800'
+                <div className={`mt-4 p-4 rounded-xl border flex gap-3 animate-in slide-in-from-top-2 ${
+                  error.type === 'quota' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-rose-50 border-rose-200 text-rose-800'
                 }`}>
-                  <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    {error.type === 'quota' ? (
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                    ) : (
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                    )}
-                  </svg>
-                  <div>
-                    <p className="text-sm font-bold">{error.type === 'quota' ? 'Quota Limit Reached' : 'Analysis Failed'}</p>
-                    <p className="text-xs opacity-90 leading-relaxed mt-1">{error.message}</p>
-                    {error.type === 'quota' && (
-                      <div className="mt-3 flex gap-3">
-                         <button onClick={handleAnalyze} className="text-[10px] font-black uppercase tracking-widest bg-amber-200 hover:bg-amber-300 px-3 py-1.5 rounded transition-colors">Retry Now</button>
-                         <a href="https://aistudio.google.com/app/plan" target="_blank" className="text-[10px] font-black uppercase tracking-widest bg-white/50 hover:bg-white px-3 py-1.5 rounded transition-colors">Check My Quota</a>
-                      </div>
-                    )}
+                  <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                  <div className="text-xs">
+                    <p className="font-bold uppercase tracking-tight mb-1">{error.type === 'quota' ? 'Search Tool Throttled' : 'Analysis Error'}</p>
+                    <p className="leading-relaxed">{error.message}</p>
                   </div>
                 </div>
               )}
+
               <div className="mt-6 flex flex-col sm:flex-row gap-4 justify-between items-center border-t border-slate-100 pt-6">
-                <p className="text-xs text-slate-400 max-w-xs text-center sm:text-left italic">
+                <p className="text-[10px] text-slate-400 max-w-xs text-center sm:text-left leading-normal italic">
                   Systems prioritize .gov and .edu data for verified results.
                 </p>
                 <button
                   onClick={handleAnalyze}
-                  disabled={isAnalyzing || !inputText.trim()}
-                  className={`w-full sm:w-auto px-10 py-3.5 rounded-xl font-black text-sm uppercase tracking-widest transition-all shadow-lg active:scale-95 ${
-                    isAnalyzing || !inputText.trim() 
-                    ? 'bg-slate-100 text-slate-300 cursor-not-allowed shadow-none' 
-                    : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-blue-200'
+                  disabled={isAnalyzing || !inputText.trim() || cooldown > 0}
+                  className={`w-full sm:w-auto px-10 py-3.5 rounded-xl font-black text-sm uppercase tracking-widest transition-all shadow-md active:scale-95 flex items-center justify-center gap-3 ${
+                    isAnalyzing || !inputText.trim() || cooldown > 0
+                    ? 'bg-slate-100 text-slate-300 cursor-not-allowed' 
+                    : 'bg-slate-900 text-white hover:bg-black'
                   }`}
                 >
                   {isAnalyzing ? (
-                    <span className="flex items-center justify-center gap-3">
+                    <>
                       <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                      {LOADING_MESSAGES[loadingMsgIdx]}
-                    </span>
+                      <span>{LOADING_MESSAGES[loadingMsgIdx]}</span>
+                    </>
+                  ) : cooldown > 0 ? (
+                    <span>Wait {cooldown}s</span>
                   ) : 'Scan Evidence'}
                 </button>
               </div>
@@ -198,106 +272,56 @@ ${result.sources.map((s, i) => `[${i+1}] ${s.title} (${s.uri})`).join('\n')}
           </section>
 
           {result && (
-            <div ref={resultsRef} className="space-y-8 animate-in fade-in slide-in-from-bottom-6 duration-700 fill-mode-both">
-              <div className="bg-slate-900 rounded-2xl shadow-2xl p-8 text-white relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/10 blur-[100px] -mr-32 -mt-32"></div>
-                <div className="relative z-10">
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
-                    <div className="flex-1">
-                      <h3 className="text-xs font-black text-blue-400 uppercase tracking-[0.2em] mb-2">Evidence Synthesis Summary</h3>
-                      <p className="text-2xl font-bold leading-tight max-w-xl serif italic">
-                        "{result.summary}"
-                      </p>
-                    </div>
-                    <div className="flex-shrink-0 flex flex-col items-center justify-center bg-white/5 border border-white/10 p-5 rounded-2xl min-w-[140px]">
-                      <span className="text-[10px] font-black uppercase text-blue-300 mb-1 tracking-widest">Evidence Score</span>
-                      <span className="text-4xl font-black text-white">{result.confidenceScore}%</span>
-                      <div className="w-full h-1.5 bg-white/10 rounded-full mt-3 overflow-hidden">
-                         <div className="h-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" style={{ width: `${result.confidenceScore}%` }}></div>
-                      </div>
-                    </div>
+            <div ref={resultsRef} className="space-y-8 animate-in fade-in slide-in-from-bottom-6 duration-700">
+              <div className="bg-slate-900 rounded-2xl p-8 text-white relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/10 blur-[80px] -mr-32 -mt-32"></div>
+                <h3 className="text-xs font-black text-blue-400 uppercase tracking-widest mb-4">Evidentiary Synthesis</h3>
+                <p className="text-2xl font-bold leading-tight serif italic mb-6">"{result.summary}"</p>
+                <div className="flex items-center gap-6 border-t border-white/10 pt-6">
+                  <div className="text-center px-4 border-r border-white/10">
+                    <span className="block text-[10px] uppercase text-slate-500 font-bold mb-1">Score</span>
+                    <span className="text-2xl font-black">{result.confidenceScore}%</span>
                   </div>
-                  <div className="flex gap-4">
-                    <button onClick={exportFullReport} className="text-[10px] font-black uppercase tracking-widest bg-blue-600 hover:bg-blue-500 transition-colors px-4 py-2 rounded-lg flex items-center gap-2">
-                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                       Copy Full Report
-                    </button>
+                  <div className="text-center px-4">
+                    <span className="block text-[10px] uppercase text-slate-500 font-bold mb-1">Citations</span>
+                    <span className="text-2xl font-black">{result.sources.length}</span>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-4">
-                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest px-2">Evidence Dossier</h3>
+                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest px-2">Analysis Breakdown</h3>
                 {result.claims.map((claim, idx) => (
-                  <div key={idx} className="bg-white border border-slate-200 rounded-xl p-6 hover:border-blue-200 transition-colors shadow-sm group">
-                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-2">
-                           <VerdictBadge verdict={claim.verdict} />
-                           <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded border ${claim.evidenceStrength === 'high' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : claim.evidenceStrength === 'medium' ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-rose-50 text-rose-600 border-rose-100'}`}>
-                             {claim.evidenceStrength} support
-                           </span>
-                        </div>
-                        <h4 className="text-lg font-bold text-slate-900 leading-snug mb-3">
-                          {claim.text}
-                        </h4>
-                        <p className="text-sm text-slate-600 leading-relaxed mb-4 bg-slate-50 p-4 rounded-lg border border-slate-100 italic">
-                          {claim.reasoning}
-                        </p>
-                        <div className="flex flex-wrap gap-2 items-center">
-                          <span className="text-[10px] font-black text-slate-300 uppercase tracking-tighter">Sources Found:</span>
-                          {claim.sourceIndices.map(sIdx => (
-                            <button 
-                              key={sIdx} 
-                              className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-slate-500 text-[11px] font-bold flex items-center justify-center hover:bg-slate-900 hover:text-white transition-all shadow-sm"
-                              onClick={() => {
-                                const el = document.getElementById(`source-${sIdx}`);
-                                el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                el?.classList.add('ring-2', 'ring-blue-500', 'bg-blue-50');
-                                setTimeout(() => el?.classList.remove('ring-2', 'ring-blue-500', 'bg-blue-50'), 2000);
-                              }}
-                            >
-                              {sIdx + 1}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                  <div key={idx} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
+                    <div className="flex items-center gap-3 mb-3">
+                       <VerdictBadge verdict={claim.verdict} />
+                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${claim.evidenceStrength === 'high' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                         {claim.evidenceStrength.toUpperCase()} CONFIDENCE
+                       </span>
                     </div>
+                    <h4 className="text-lg font-bold text-slate-900 mb-3">{claim.text}</h4>
+                    <p className="text-sm text-slate-600 leading-relaxed italic">{claim.reasoning}</p>
                   </div>
                 ))}
               </div>
 
               <div className="bg-white rounded-2xl p-8 border border-slate-200 shadow-sm">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
-                  <div>
-                    <h3 className="text-xl font-bold text-slate-900">Reference Bibliography</h3>
-                    <p className="text-sm text-slate-500">Curated credible sources identified during the evidence discovery phase.</p>
-                  </div>
-                  <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-xl border border-slate-200">
-                    <select 
-                      value={citationFormat}
-                      onChange={(e) => setCitationFormat(e.target.value as CitationFormat)}
-                      className="text-xs font-bold border-none bg-transparent focus:ring-0 pr-8"
-                    >
-                      <option value="Plain Text">Plain Text</option>
-                      <option value="APA">APA Style</option>
-                      <option value="MLA">MLA Style</option>
-                      <option value="Markdown">Markdown</option>
-                    </select>
-                    <button 
-                      onClick={copyAllCitations}
-                      className="bg-slate-900 text-white p-2 rounded-lg hover:bg-slate-700 transition-colors shadow-sm"
-                      title="Copy all citations"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
-                    </button>
-                  </div>
+                <div className="flex items-center justify-between mb-8">
+                  <h3 className="text-xl font-bold text-slate-900">Bibliography</h3>
+                  <select 
+                    value={citationFormat}
+                    onChange={(e) => setCitationFormat(e.target.value as CitationFormat)}
+                    className="text-xs font-bold border-slate-200 bg-slate-50 p-2 rounded-lg"
+                  >
+                    <option value="Plain Text">Plain Text</option>
+                    <option value="APA">APA Style</option>
+                    <option value="MLA">MLA Style</option>
+                    <option value="Markdown">Markdown</option>
+                  </select>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {result.sources.map((source, i) => (
-                    <div id={`source-${i}`} key={i} className="transition-all duration-500 rounded-xl">
-                      <SourceCard source={source} index={i} />
-                    </div>
+                    <SourceCard key={i} source={source} index={i} />
                   ))}
                 </div>
               </div>
@@ -306,78 +330,77 @@ ${result.sources.map((s, i) => `[${i+1}] ${s.title} (${s.uri})`).join('\n')}
         </div>
 
         <div className="lg:col-span-4 space-y-6">
-          <div className="bg-gradient-to-br from-slate-800 to-slate-950 rounded-2xl shadow-xl p-6 text-white overflow-hidden relative border border-slate-700">
-            <h4 className="font-bold text-lg mb-3 flex items-center gap-2">
-              <span className="text-blue-400 font-mono text-sm">[01]</span>
-              Expert Protocol
-            </h4>
-            <p className="text-sm text-slate-300 leading-relaxed mb-6 italic serif">
-              "Evidentiary discovery focuses on cross-referencing claims against established reporting and official data points."
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-center">
-                <span className="block text-2xl font-black text-white">{history.length}</span>
-                <span className="text-[9px] text-slate-400 uppercase tracking-widest">Saved Reports</span>
+          {/* History / Archive Sidebar */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col h-[700px] sticky top-24">
+            <div className="p-6 border-b border-slate-100">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Archive Dossier</h3>
+                <span className="text-[10px] font-mono text-slate-300">{history.length} cases</span>
               </div>
-              <div className="bg-white/5 border border-white/10 rounded-lg p-3 text-center">
-                <span className="block text-2xl font-black text-blue-400">99.8</span>
-                <span className="text-[9px] text-slate-400 uppercase tracking-widest">Uptime</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button 
+                  onClick={exportArchive}
+                  className="text-[9px] font-black uppercase tracking-wider py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-all flex items-center justify-center gap-2"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                  Export
+                </button>
+                <button 
+                  onClick={triggerImport}
+                  className="text-[9px] font-black uppercase tracking-wider py-2 bg-slate-100 text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                  Import
+                </button>
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={importArchive} 
+                  className="hidden" 
+                  accept=".json"
+                />
               </div>
             </div>
-          </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Archive</h3>
-              {history.length > 0 && (
-                <button onClick={() => { if(confirm('Wipe history?')) {setHistory([]); localStorage.removeItem('veritas_history');}}} className="text-[10px] font-bold text-slate-300 hover:text-rose-500 transition-colors uppercase">Clear Dossier</button>
+            <div className="flex-grow overflow-y-auto p-4 space-y-3 custom-scrollbar">
+              {history.length > 0 ? (
+                history.map((item) => (
+                  <div key={item.id} className="group relative">
+                    <button
+                      onClick={() => { setInputText(item.input); setResult(item.result); setError(null); }}
+                      className="w-full text-left p-4 rounded-xl border border-slate-100 bg-slate-50 hover:bg-white hover:border-blue-200 transition-all"
+                    >
+                      <p className="text-xs font-bold text-slate-800 line-clamp-2 mb-2 group-hover:text-blue-600 transition-colors pr-6">{item.input}</p>
+                      <div className="flex justify-between text-[10px] font-mono text-slate-400">
+                        <span>{new Date(item.timestamp).toLocaleDateString()}</span>
+                        <span className="text-blue-500 font-bold">{item.result.confidenceScore}% EV</span>
+                      </div>
+                    </button>
+                    <button 
+                      onClick={(e) => deleteHistoryItem(item.id, e)}
+                      className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all p-1"
+                      title="Purge Case"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center opacity-30 py-12">
+                   <svg className="w-12 h-12 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                   <p className="text-[10px] uppercase font-black tracking-widest">Archive Empty</p>
+                </div>
               )}
             </div>
-            {history.length > 0 ? (
-              <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                {history.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => { setInputText(item.input); setResult(item.result); setError(null); }}
-                    className="w-full text-left p-4 rounded-xl border border-slate-100 bg-slate-50 hover:bg-white hover:border-blue-200 hover:shadow-md transition-all group"
-                  >
-                    <p className="text-xs font-bold text-slate-800 line-clamp-2 mb-2 group-hover:text-blue-600 transition-colors">
-                      {item.input}
-                    </p>
-                    <div className="flex items-center justify-between text-[10px]">
-                      <span className="text-slate-400 font-medium font-mono">
-                        {new Date(item.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                      </span>
-                      <span className={`font-black px-1.5 py-0.5 rounded-md ${item.result.confidenceScore > 75 ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                        {item.result.confidenceScore}% EV
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="py-12 text-center text-slate-300">
-                <p className="text-xs italic">No archive entries found.</p>
-              </div>
-            )}
+
+            <div className="p-4 bg-slate-50 border-t border-slate-100 rounded-b-2xl">
+              <p className="text-[9px] text-slate-400 leading-normal italic text-center">
+                Investigative dossiers are saved to your local terminal. Download archive periodically for off-site backup.
+              </p>
+            </div>
           </div>
         </div>
       </main>
-
-      <footer className="max-w-7xl mx-auto w-full px-6 py-12 border-t border-slate-200 mt-20 text-center sm:text-left">
-         <div className="flex flex-col sm:flex-row justify-between items-center gap-10">
-            <div>
-              <p className="text-xs font-black text-slate-900 uppercase tracking-widest mb-1">Veritas Intelligence Division</p>
-              <p className="text-[10px] text-slate-400 max-w-sm leading-relaxed">
-                Empowering investigative journalists with evidentiary discovery through neutral automated cross-referencing.
-              </p>
-            </div>
-            <div className="flex gap-8 text-[10px] font-black uppercase text-slate-400 tracking-tighter">
-               <a href="#" className="hover:text-blue-600 transition-colors">Methodology</a>
-               <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="hover:text-blue-600 transition-colors">Billing Protocol</a>
-            </div>
-         </div>
-      </footer>
     </div>
   );
 };

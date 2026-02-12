@@ -30,4 +30,10 @@ export interface HistoryItem {
   result: FactCheckResult;
 }
 
+export interface User {
+  email: string;
+  lastLogin: number;
+}
+
 export type CitationFormat = 'APA' | 'MLA' | 'Markdown' | 'Plain Text';
+export type Language = 'en' | 'fr' | 'zh' | 'es';
