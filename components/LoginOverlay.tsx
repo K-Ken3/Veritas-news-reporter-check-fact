@@ -1,5 +1,6 @@
 
 import React, { useState } from 'react';
+import Logo from './Logo';
 
 interface LoginOverlayProps {
   onLogin: (email: string) => void;
@@ -15,7 +16,6 @@ const LoginOverlay: React.FC<LoginOverlayProps> = ({ onLogin }) => {
     if (!email || !password) return;
     
     setIsAuthenticating(true);
-    // Simulate secure handshake with investigative servers
     setTimeout(() => {
       onLogin(email);
     }, 1500);
@@ -23,13 +23,14 @@ const LoginOverlay: React.FC<LoginOverlayProps> = ({ onLogin }) => {
 
   return (
     <div className="fixed inset-0 z-[100] bg-slate-900 flex items-center justify-center p-4 overflow-hidden">
-      {/* Background Decorative Elements */}
       <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-blue-600/10 blur-[120px] rounded-full -mr-64 -mt-64"></div>
       <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-indigo-600/10 blur-[120px] rounded-full -ml-64 -mb-64"></div>
       
       <div className="max-w-md w-full animate-in fade-in zoom-in duration-700">
         <div className="text-center mb-10">
-          <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center text-slate-900 font-black text-3xl shadow-2xl mx-auto mb-6 italic rotate-3">V</div>
+          <div className="flex justify-center mb-8">
+            <Logo className="h-20 drop-shadow-2xl" />
+          </div>
           <h1 className="text-3xl font-black text-white tracking-tight mb-2 uppercase italic">Veritas Terminal</h1>
           <p className="text-slate-400 text-sm font-medium">Restricted Access: Investigative Personnel Only</p>
         </div>
@@ -78,7 +79,7 @@ const LoginOverlay: React.FC<LoginOverlayProps> = ({ onLogin }) => {
           
           <div className="pt-4 text-center">
             <p className="text-[10px] text-slate-500 leading-relaxed">
-              By logging in, you agree to the Investigative Integrity Protocols. All data is cached locally and tied to your identity.
+              By logging in, you agree to the Investigative Integrity Protocols. All data is cached locally.
             </p>
           </div>
         </form>

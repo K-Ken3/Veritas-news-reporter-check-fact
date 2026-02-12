@@ -36,4 +36,3 @@ export interface User {
 }
 
 export type CitationFormat = 'APA' | 'MLA' | 'Markdown' | 'Plain Text';
-export type Language = 'en' | 'fr' | 'zh' | 'es';
